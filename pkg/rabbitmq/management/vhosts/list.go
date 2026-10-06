@@ -15,6 +15,7 @@ func (c *VhostsClient) List() ([]*vhostsResponse, *structs.RabbitMQErrorResponse
 	if err != nil {
 		return nil, nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errorResponse structs.RabbitMQErrorResponse

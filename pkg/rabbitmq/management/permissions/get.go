@@ -16,6 +16,7 @@ func (c *PermissionsClient) Get(user string) (*permissionsResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get permissions for user %s", user)

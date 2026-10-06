@@ -32,15 +32,9 @@ export default function ScoreboardRoundPage({ theme }: props) {
   const [latestRound, setLatestRound] =
     useState<LatestRoundSubscription["latestRound"]["number"]>();
 
-  const { data, error, loading, refetch } = useScoreboardQuery({
+  const { data, error, loading } = useScoreboardQuery({
     variables: { round: round ? parseInt(round) : undefined },
   });
-
-  useEffect(() => {
-    refetch();
-    refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only effect
-  }, []);
 
   useLatestRoundSubscription({
     onError: (error) => {

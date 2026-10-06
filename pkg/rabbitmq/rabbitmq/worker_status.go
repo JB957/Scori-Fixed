@@ -25,7 +25,6 @@ func workerStatusExchange(conn *amqp.Connection) (*amqp.Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	err = ch.ExchangeDeclare(
 		WorkerStatusExchange,
 		"fanout",
@@ -36,6 +35,7 @@ func workerStatusExchange(conn *amqp.Connection) (*amqp.Channel, error) {
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -52,6 +52,12 @@ func (r *RabbitMQConnections) WorkerStatusListener(ctx context.Context) (*worker
 	if err != nil {
 		return nil, err
 	}
+	keepChannel := false
+	defer func() {
+		if !keepChannel {
+			_ = ch.Close()
+		}
+	}()
 
 	q, err := ch.QueueDeclare(
 		"",
@@ -90,6 +96,7 @@ func (r *RabbitMQConnections) WorkerStatusListener(ctx context.Context) (*worker
 		return nil, err
 	}
 
+	keepChannel = true
 	return &workerStatusListener{
 		ch:   ch,
 		msgs: msgs,
@@ -110,7 +117,10 @@ func (l *workerStatusListener) Consume(ctx context.Context) <-chan *structs.Work
 			select {
 			case <-ctx.Done():
 				return
-			case msg := <-l.msgs:
+			case msg, ok := <-l.msgs:
+				if !ok {
+					return
+				}
 				var workerStatus structs.WorkerStatus
 				err := json.Unmarshal(msg.Body, &workerStatus)
 				if err != nil {

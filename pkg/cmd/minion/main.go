@@ -2,6 +2,8 @@ package minion
 
 import (
 	"context"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,15 +31,22 @@ var Cmd = &cobra.Command{
 }
 
 func run(cmd *cobra.Command, args []string) {
-	for {
+	ctx := cmd.Context()
+	for ctx.Err() == nil {
 		logrus.Info("Starting minion worker")
-		mainLoop()
+		mainLoop(ctx)
 		logrus.Info("minion worker stopped")
-		time.Sleep(time.Second * 5)
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
-func mainLoop() {
+func mainLoop(ctx context.Context) {
 	rabbitmqClient, err := rabbitmq.Client(
 		config.RabbitMQ.Minion.User,
 		config.RabbitMQ.Minion.Password,
@@ -51,7 +60,7 @@ func mainLoop() {
 	var backOff atomic.Int64
 	backOff.Store(int64(time.Second))
 	heartbeatSuccess := make(chan struct{}, 1)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Reset backoff on successful heartbeat
@@ -69,14 +78,20 @@ func mainLoop() {
 	// Run minion loop, retry with backoff on failure
 	// Exit mainLoop when backoff reaches max (connection likely unhealthy)
 	minionLoop(ctx, rabbitmqClient, heartbeatSuccess)
-	for {
+	for ctx.Err() == nil {
 		currentBackOff := time.Duration(backOff.Load())
 		if currentBackOff >= time.Minute {
 			logrus.Warn("max backoff reached, reconnecting to rabbitmq")
 			return
 		}
 
-		time.Sleep(currentBackOff)
+		timer := time.NewTimer(currentBackOff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 		minionLoop(ctx, rabbitmqClient, heartbeatSuccess)
 
 		newBackOff := backOff.Load() * 2
@@ -184,6 +199,13 @@ func score(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections) {
 	}
 	defer taskResponseClient.Close()
 
+	// Checks are network-bound, so allow modest concurrency while keeping each
+	// minion's memory, sockets, and goroutine count bounded.
+	maxConcurrentChecks := min(max(runtime.NumCPU()*2, 4), 32)
+	semaphore := make(chan struct{}, maxConcurrentChecks)
+	var checks sync.WaitGroup
+	defer checks.Wait()
+
 	for {
 		// recieved score task
 		task, err := taskRequestListener.Consume(ctx)
@@ -217,10 +239,19 @@ func score(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections) {
 			continue
 		}
 
+		select {
+		case <-ctx.Done():
+			return
+		case semaphore <- struct{}{}:
+		}
+
 		// run check
+		checks.Add(1)
 		go func(checkDeadline time.Time, submissionDeadline time.Time, statusID uuid.UUID, check checks.Check, task_config string) {
-			checkCtx, checkCancel := context.WithDeadline(context.Background(), checkDeadline)
-			submissionCtx, submissionCancel := context.WithDeadline(context.Background(), submissionDeadline)
+			defer checks.Done()
+			defer func() { <-semaphore }()
+			checkCtx, checkCancel := context.WithDeadline(ctx, checkDeadline)
+			submissionCtx, submissionCancel := context.WithDeadline(ctx, submissionDeadline)
 			defer checkCancel()
 			defer submissionCancel()
 

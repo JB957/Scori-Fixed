@@ -1,6 +1,11 @@
 package cmd
 
 import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/scorify/scorify/pkg/cmd/koth"
 	"github.com/scorify/scorify/pkg/cmd/minion"
 	"github.com/scorify/scorify/pkg/cmd/server"
@@ -27,7 +32,9 @@ func run(cmd *cobra.Command, args []string) {
 
 // Entrypoint for all commands
 func Execute() error {
-	return rootCmd.Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return rootCmd.ExecuteContext(ctx)
 }
 
 // registers all commands

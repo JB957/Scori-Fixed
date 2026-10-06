@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   Box,
@@ -24,17 +24,13 @@ import {
 import { useURLParam } from "../hooks";
 
 export default function Statuses() {
-  const { data, refetch } = useStatusesOptionQuery({
+  const { data } = useStatusesOptionQuery({
     onError: (error) => {
       enqueueSnackbar("Failed to fetch statuses options", {
         variant: "error",
       });
       console.error(error);
     },
-  });
-
-  useEffect(() => {
-    refetch();
   });
 
   const { parameter: fromTime, setParameter: setFromTime } =

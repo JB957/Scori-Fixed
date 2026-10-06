@@ -28,7 +28,6 @@ func (c *PermissionsClient) Put(user string, vhost string, configure string, rea
 	if err != nil {
 		return nil, err
 	}
-
 	reqBodyBuffer := bytes.NewBuffer(reqBodyBytes)
 
 	req, err := http.NewRequest(http.MethodPut, url, reqBodyBuffer)
@@ -40,6 +39,7 @@ func (c *PermissionsClient) Put(user string, vhost string, configure string, rea
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		var errorResponse structs.RabbitMQErrorResponse

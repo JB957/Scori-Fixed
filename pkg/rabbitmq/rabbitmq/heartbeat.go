@@ -41,7 +41,11 @@ func heartbeatQueue(conn *amqp.Connection) (*amqp.Channel, amqp.Queue, error) {
 		nil,
 	)
 
-	return ch, q, err
+	if err != nil {
+		_ = ch.Close()
+		return nil, amqp.Queue{}, err
+	}
+	return ch, q, nil
 }
 
 type heartbeatListener struct {
@@ -66,6 +70,7 @@ func (r *RabbitMQConnections) HeartbeatListener(ctx context.Context) (*heartbeat
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -82,8 +87,11 @@ func (l *heartbeatListener) Close() error {
 func (l *heartbeatListener) Consume(ctx context.Context) (*structs.Heartbeat, error) {
 	select {
 	case <-ctx.Done():
-		return nil, nil
-	case msg := <-l.msgs:
+		return nil, ctx.Err()
+	case msg, ok := <-l.msgs:
+		if !ok {
+			return nil, context.Canceled
+		}
 		var heartbeat structs.Heartbeat
 		err := json.Unmarshal(msg.Body, &heartbeat)
 		if err != nil {

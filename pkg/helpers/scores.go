@@ -22,15 +22,13 @@ func RecomputeScores(tx *ent.Tx, redisClient *redis.Client, ctx context.Context)
 		return fmt.Errorf("failed to delete old score caches: %v", err)
 	}
 
-	scoreCacheUpdates := make([]*ent.ScoreCacheCreate, 0)
-
 	type ScoreCaches_t struct {
 		UserID uuid.UUID `json:"user_id"`
 		Score  int       `json:"sum"`
 	}
 
 	for _, entRound := range entRounds {
-		ScoreCaches := make([]ScoreCaches_t, 0)
+		scoreCaches := make([]ScoreCaches_t, 0)
 
 		err = tx.Status.Query().
 			Where(
@@ -44,25 +42,26 @@ func RecomputeScores(tx *ent.Tx, redisClient *redis.Client, ctx context.Context)
 					status.FieldPoints,
 				),
 			).
-			Scan(ctx, &ScoreCaches)
+			Scan(ctx, &scoreCaches)
 		if err != nil {
 			return fmt.Errorf("failed to get scores: %v", err)
 		}
 
-		for _, ScoreCache := range ScoreCaches {
+		scoreCacheUpdates := make([]*ent.ScoreCacheCreate, 0, len(scoreCaches))
+		for _, scoreCache := range scoreCaches {
 			scoreCacheUpdates = append(
 				scoreCacheUpdates,
 				tx.ScoreCache.Create().
-					SetUserID(ScoreCache.UserID).
+					SetUserID(scoreCache.UserID).
 					SetRoundID(entRound.ID).
-					SetPoints(ScoreCache.Score),
+					SetPoints(scoreCache.Score),
 			)
 		}
-	}
-
-	_, err = tx.ScoreCache.CreateBulk(scoreCacheUpdates...).Save(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to save score caches: %v", err)
+		if len(scoreCacheUpdates) > 0 {
+			if _, err = tx.ScoreCache.CreateBulk(scoreCacheUpdates...).Save(ctx); err != nil {
+				return fmt.Errorf("failed to save score caches for round %d: %v", entRound.Number, err)
+			}
+		}
 	}
 
 	scoreboard, err := Scoreboard(ctx, tx.Client())

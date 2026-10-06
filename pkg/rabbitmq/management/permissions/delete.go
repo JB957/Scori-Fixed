@@ -24,6 +24,7 @@ func (c *PermissionsClient) Delete(user string, vhost string) (*structs.RabbitMQ
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
 		var errorResponse structs.RabbitMQErrorResponse

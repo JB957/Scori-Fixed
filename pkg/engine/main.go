@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -307,12 +308,12 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		kothRoundTasks.Set(entKothStatus.ID, kothTasks[i])
 	}
 
-	wg := &sync.WaitGroup{}
-
-	wg.Add(roundTasks.Length() + kothRoundTasks.Length())
+	var submitWG sync.WaitGroup
+	submitWG.Add(2)
 
 	// Submit tasks to the workers
 	go func() {
+		defer submitWG.Done()
 		for _, entStatus := range entStatuses {
 			entConfig, ok := roundTasks.Get(entStatus.ID)
 			if !ok {
@@ -339,6 +340,7 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 	}()
 
 	go func() {
+		defer submitWG.Done()
 		for _, entKothStatus := range entKothStatuses {
 			entKothCheck, ok := kothRoundTasks.Get(entKothStatus.ID)
 			if !ok {
@@ -366,6 +368,10 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 	kothOnce := &sync.Once{}
 	checksRemain := roundTasks.Length() > 0
 	kothChecksRemain := kothRoundTasks.Length() > 0
+	// Bound concurrent status writes so large rounds cannot create one
+	// goroutine and database operation per response at once.
+	updateSlots := make(chan struct{}, min(max(runtime.NumCPU(), 4), 16))
+	var updateWG sync.WaitGroup
 
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
@@ -446,6 +452,8 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 			}
 		}
 	}()
+	defer submitWG.Wait()
+	defer updateWG.Wait()
 
 	// Wait for the results
 	for checksRemain || kothChecksRemain {
@@ -457,30 +465,42 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		case <-ctx.Done():
 			return nil
 		case result := <-e.taskResponseChan:
+			select {
+			case <-ctx.Done():
+				return nil
+			case updateSlots <- struct{}{}:
+			}
+			updateWG.Add(1)
 			if result.Status == status.StatusUp || result.Status == status.StatusDown || result.Status == status.StatusUnknown {
-				go e.updateStatus(ctx, roundTasks, result.StatusID, result.Error, result.Status, result.MinionID, allChecksReported, checksOnce, wg)
+				go func() {
+					defer updateWG.Done()
+					defer func() { <-updateSlots }()
+					e.updateStatus(ctx, roundTasks, result.StatusID, result.Error, result.Status, result.MinionID, allChecksReported, checksOnce)
+				}()
 			} else {
-				go e.updateStatus(ctx, roundTasks, result.StatusID, result.Error, status.StatusUnknown, uuid.UUID{}, allChecksReported, checksOnce, wg)
+				go func() {
+					defer updateWG.Done()
+					defer func() { <-updateSlots }()
+					e.updateStatus(ctx, roundTasks, result.StatusID, result.Error, status.StatusUnknown, uuid.UUID{}, allChecksReported, checksOnce)
+				}()
 				logrus.WithFields(logrus.Fields{
 					"status":    result.Status,
 					"status_id": result.StatusID,
 				}).Error("unknown status")
 			}
 		case result := <-e.kothTaskResponseChan:
-			go e.updateKothStatus(ctx, kothRoundTasks, result, allKothChecksReported, kothOnce, wg)
+			select {
+			case <-ctx.Done():
+				return nil
+			case updateSlots <- struct{}{}:
+			}
+			updateWG.Add(1)
+			go func() {
+				defer updateWG.Done()
+				defer func() { <-updateSlots }()
+				e.updateKothStatus(ctx, kothRoundTasks, result, allKothChecksReported, kothOnce)
+			}()
 		}
-	}
-
-	wgCtx, wgCancel := context.WithCancel(context.Background())
-	defer wgCancel()
-	go func() {
-		defer wgCancel()
-		wg.Wait()
-	}()
-
-	select {
-	case <-wgCtx.Done():
-	case <-ctx.Done():
 	}
 
 	return nil
@@ -490,14 +510,12 @@ func cleanStatus(s string) string {
 	return strings.ReplaceAll(s, "\x00", "")
 }
 
-func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.CheckConfig], statusID uuid.UUID, errorMessage string, checkStatus status.Status, minionID uuid.UUID, allChecksReported chan<- struct{}, once *sync.Once, wg *sync.WaitGroup) {
+func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.CheckConfig], statusID uuid.UUID, errorMessage string, checkStatus status.Status, minionID uuid.UUID, allChecksReported chan<- struct{}, once *sync.Once) {
 	ok, remaining := roundTasks.Pop(statusID)
 	if !ok {
 		logrus.WithField("status_id", statusID).Error("uuid not belong to round was submitted")
 		return
 	}
-
-	defer wg.Done()
 
 	entStatusUpdate := e.ent.Status.UpdateOneID(statusID).
 		SetStatus(checkStatus).
@@ -523,14 +541,12 @@ func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[u
 	}
 }
 
-func (e *Client) updateKothStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.KothCheck], kothTaskResponse *structs.KothTaskResponse, allChecksReported chan<- struct{}, once *sync.Once, wg *sync.WaitGroup) {
+func (e *Client) updateKothStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.KothCheck], kothTaskResponse *structs.KothTaskResponse, allChecksReported chan<- struct{}, once *sync.Once) {
 	ok, remaining := roundTasks.Pop(kothTaskResponse.StatusID)
 	if !ok {
 		logrus.WithField("status_id", kothTaskResponse.StatusID).Error("uuid not belong to round was submitted")
 		return
 	}
-
-	defer wg.Done()
 
 	defer func() {
 		if remaining == 0 {

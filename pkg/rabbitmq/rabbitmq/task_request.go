@@ -35,7 +35,11 @@ func taskRequestQueue(conn *amqp.Connection) (*amqp.Channel, amqp.Queue, error) 
 		nil,
 	)
 
-	return ch, q, err
+	if err != nil {
+		_ = ch.Close()
+		return nil, amqp.Queue{}, err
+	}
+	return ch, q, nil
 }
 
 type taskRequestListener struct {
@@ -48,18 +52,23 @@ func (r *RabbitMQConnections) TaskRequestListener(ctx context.Context) (*taskReq
 	if err != nil {
 		return nil, err
 	}
+	if err := ch.Qos(32, 0, false); err != nil {
+		_ = ch.Close()
+		return nil, err
+	}
 
 	msgs, err := ch.ConsumeWithContext(
 		ctx,
 		q.Name,
 		"",
-		true,
+		false,
 		false,
 		false,
 		false,
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -77,10 +86,17 @@ func (l *taskRequestListener) Consume(ctx context.Context) (*structs.TaskRequest
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case msg := <-l.msgs:
+	case msg, ok := <-l.msgs:
+		if !ok {
+			return nil, context.Canceled
+		}
 		var taskRequest structs.TaskRequest
 		err := json.Unmarshal(msg.Body, &taskRequest)
 		if err != nil {
+			_ = msg.Ack(false)
+			return nil, err
+		}
+		if err := msg.Ack(false); err != nil {
 			return nil, err
 		}
 

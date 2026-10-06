@@ -46,7 +46,6 @@ func kothTaskRequestExchange(conn *amqp.Connection) (*amqp.Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	err = ch.ExchangeDeclare(
 		KothTaskRequestExchange,
 		"topic",
@@ -57,6 +56,7 @@ func kothTaskRequestExchange(conn *amqp.Connection) (*amqp.Channel, error) {
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -73,6 +73,12 @@ func (r *RabbitMQConnections) KothTaskRequestListener(ctx context.Context, check
 	if err != nil {
 		return nil, err
 	}
+	keepChannel := false
+	defer func() {
+		if !keepChannel {
+			_ = ch.Close()
+		}
+	}()
 
 	q, err := ch.QueueDeclare(
 		"",
@@ -113,6 +119,7 @@ func (r *RabbitMQConnections) KothTaskRequestListener(ctx context.Context, check
 		return nil, err
 	}
 
+	keepChannel = true
 	return &kothTaskRequestListener{
 		ch:   ch,
 		msgs: msgs,
@@ -127,7 +134,10 @@ func (l *kothTaskRequestListener) Consume(ctx context.Context) (*structs.KothTas
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case msg := <-l.msgs:
+	case msg, ok := <-l.msgs:
+		if !ok {
+			return nil, context.Canceled
+		}
 		var task_request structs.KothTaskRequest
 
 		err := json.Unmarshal(msg.Body, &task_request)

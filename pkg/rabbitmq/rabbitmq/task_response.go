@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/scorify/scorify/pkg/structs"
@@ -35,7 +36,11 @@ func taskResponseQueue(conn *amqp.Connection) (*amqp.Channel, amqp.Queue, error)
 		nil,
 	)
 
-	return ch, q, err
+	if err != nil {
+		_ = ch.Close()
+		return nil, amqp.Queue{}, err
+	}
+	return ch, q, nil
 }
 
 type taskResponseListener struct {
@@ -48,18 +53,23 @@ func (r *RabbitMQConnections) TaskResponseListener(ctx context.Context) (*taskRe
 	if err != nil {
 		return nil, err
 	}
+	if err := ch.Qos(64, 0, false); err != nil {
+		_ = ch.Close()
+		return nil, err
+	}
 
 	msgs, err := ch.ConsumeWithContext(
 		ctx,
 		q.Name,
 		"",
-		true,
+		false,
 		false,
 		false,
 		false,
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -77,10 +87,17 @@ func (l *taskResponseListener) Consume(ctx context.Context) (*structs.TaskRespon
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case msg := <-l.msgs:
+	case msg, ok := <-l.msgs:
+		if !ok {
+			return nil, context.Canceled
+		}
 		var taskResponse structs.TaskResponse
 		err := json.Unmarshal(msg.Body, &taskResponse)
 		if err != nil {
+			_ = msg.Ack(false)
+			return nil, err
+		}
+		if err := msg.Ack(false); err != nil {
 			return nil, err
 		}
 
@@ -89,8 +106,9 @@ func (l *taskResponseListener) Consume(ctx context.Context) (*structs.TaskRespon
 }
 
 type taskResponseClient struct {
-	ch *amqp.Channel
-	q  amqp.Queue
+	ch   *amqp.Channel
+	q    amqp.Queue
+	lock sync.Mutex
 }
 
 func (r *RabbitMQConnections) TaskResponseClient() (*taskResponseClient, error) {
@@ -115,6 +133,8 @@ func (c *taskResponseClient) SubmitTaskResponse(ctx context.Context, taskRespons
 		return err
 	}
 
+	c.lock.Lock()
+	defer c.lock.Unlock()
 	return c.ch.PublishWithContext(
 		ctx,
 		"",

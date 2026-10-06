@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/scorify/scorify/pkg/config"
 	"github.com/scorify/scorify/pkg/rabbitmq/management/permissions"
@@ -31,9 +32,15 @@ func Client() (*client, error) {
 	creds := fmt.Sprintf("%s:%s", config.RabbitMQ.Server.User, config.RabbitMQ.Server.Password)
 	authHeader := fmt.Sprintf("Basic %s", string(base64.StdEncoding.EncodeToString([]byte(creds))))
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 16
+	transport.MaxIdleConnsPerHost = 4
+	transport.IdleConnTimeout = 30 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Second
 	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
 		Transport: &roundTripper{
-			transport:  http.DefaultTransport,
+			transport:  transport,
 			authHeader: authHeader,
 		},
 	}

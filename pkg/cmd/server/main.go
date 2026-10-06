@@ -267,7 +267,7 @@ func injectSubmissionFileHandler(entClient *ent.Client) gin.HandlerFunc {
 	}
 }
 
-func startWebServer(wg *sync.WaitGroup, entClient *ent.Client, redisClient *redis.Client, engineClient *engine.Client, taskRequestChan chan *structs.TaskRequest, taskResponseChan chan *structs.TaskResponse, workerStatusChan chan *structs.WorkerStatus) {
+func startWebServer(ctx context.Context, wg *sync.WaitGroup, entClient *ent.Client, redisClient *redis.Client, engineClient *engine.Client, taskRequestChan chan *structs.TaskRequest, taskResponseChan chan *structs.TaskResponse, workerStatusChan chan *structs.WorkerStatus) {
 	defer wg.Done()
 
 	gin.SetMode(gin.ReleaseMode)
@@ -296,10 +296,30 @@ func startWebServer(wg *sync.WaitGroup, entClient *ent.Client, redisClient *redi
 
 	logrus.Printf("Starting web server on http://%s:%d", config.Domain, config.Port)
 
-	err = router.Run(fmt.Sprintf(":%d", config.Port))
-	if err != nil {
-		logrus.WithError(err).Error("failed to start server")
-	} else {
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", config.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logrus.WithError(err).Warn("web server shutdown timed out")
+			_ = server.Close()
+		}
+	case err := <-serverErrors:
+		if err != nil && err != http.ErrServerClosed {
+			logrus.WithError(err).Error("failed to start server")
+		}
+	}
+	if ctx.Err() != nil {
 		logrus.Info("Server stopped")
 	}
 }
@@ -307,6 +327,7 @@ func startWebServer(wg *sync.WaitGroup, entClient *ent.Client, redisClient *redi
 func startRabbitMQServer(
 	wg *sync.WaitGroup,
 	ctx context.Context,
+	cancel context.CancelFunc,
 	taskRequestChan <-chan *structs.TaskRequest,
 	taskResponseChan chan<- *structs.TaskResponse,
 	workerStatusChan <-chan *structs.WorkerStatus,
@@ -316,6 +337,7 @@ func startRabbitMQServer(
 	entClient *ent.Client,
 ) {
 	defer wg.Done()
+	defer cancel()
 
 	// setup rabbitmq
 	managementClient, err := management.Client()
@@ -447,7 +469,7 @@ func startRabbitMQServer(
 		}
 	}
 
-	rabbitmq.Serve(
+	err = rabbitmq.Serve(
 		ctx,
 		taskRequestChan,
 		taskResponseChan,
@@ -457,45 +479,49 @@ func startRabbitMQServer(
 		redisClient,
 		entClient,
 	)
+	if err != nil {
+		logrus.WithError(err).Error("RabbitMQ service stopped")
+	}
 }
 
 // serverRun runs the server
 func run(cmd *cobra.Command, args []string) {
-	ctx := cmd.Context()
+	ctx, cancel := context.WithCancel(cmd.Context())
+	defer cancel()
 
 	entClient, err := data.NewClient(ctx)
 	if err != nil {
 		logrus.WithError(err).Fatal("failed to create ent client")
 	}
+	defer entClient.Close()
 
-	taskRequestChan := make(chan *structs.TaskRequest)
+	taskRequestChan := make(chan *structs.TaskRequest, 64)
 	defer close(taskRequestChan)
 
-	taskResponseChan := make(chan *structs.TaskResponse)
+	taskResponseChan := make(chan *structs.TaskResponse, 64)
 	defer close(taskResponseChan)
 
-	workerStatusChan := make(chan *structs.WorkerStatus)
+	workerStatusChan := make(chan *structs.WorkerStatus, 8)
 	defer close(workerStatusChan)
 
-	kothTaskRequestChan := make(chan *structs.KothTaskRequestBundle)
+	kothTaskRequestChan := make(chan *structs.KothTaskRequestBundle, 32)
 	defer close(kothTaskRequestChan)
 
-	kothTaskResponseChan := make(chan *structs.KothTaskResponse)
+	kothTaskResponseChan := make(chan *structs.KothTaskResponse, 32)
 	defer close(kothTaskResponseChan)
 
 	redisClient := cache.NewRedisClient()
+	defer redisClient.Close()
 
 	engineClient := engine.NewEngine(ctx, entClient, redisClient, taskRequestChan, taskResponseChan, workerStatusChan, kothTaskRequestChan, kothTaskResponseChan)
 
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
+	wg.Add(2)
 
-	go startWebServer(wg, entClient, redisClient, engineClient, taskRequestChan, taskResponseChan, workerStatusChan)
-	go startRabbitMQServer(wg, cmd.Context(), taskRequestChan, taskResponseChan, workerStatusChan, kothTaskRequestChan, kothTaskResponseChan, redisClient, entClient)
+	go startWebServer(ctx, wg, entClient, redisClient, engineClient, taskRequestChan, taskResponseChan, workerStatusChan)
+	go startRabbitMQServer(wg, ctx, cancel, taskRequestChan, taskResponseChan, workerStatusChan, kothTaskRequestChan, kothTaskResponseChan, redisClient, entClient)
 
 	wg.Wait()
-
-	ctx.Done()
 
 	logrus.Info("Server stopped")
 }

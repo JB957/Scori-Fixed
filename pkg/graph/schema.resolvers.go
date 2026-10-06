@@ -2745,7 +2745,10 @@ func (r *subscriptionResolver) GlobalNotification(ctx context.Context) (<-chan *
 		ch := sub.Channel()
 		for {
 			select {
-			case msg := <-ch:
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
 				notification := model.Notification{}
 				err := json.Unmarshal([]byte(msg.Payload), &notification)
 				if err != nil {
@@ -2788,7 +2791,10 @@ func (r *subscriptionResolver) EngineState(ctx context.Context) (<-chan model.En
 
 		for {
 			select {
-			case msg := <-ch:
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
 				select {
 				case engineStateChan <- model.EngineState(msg.Payload):
 				case <-ctx.Done():
@@ -2816,7 +2822,10 @@ func (r *subscriptionResolver) ScoreboardUpdate(ctx context.Context) (<-chan *mo
 
 		for {
 			select {
-			case msg := <-scoreboardChan:
+			case msg, ok := <-scoreboardChan:
+				if !ok {
+					return
+				}
 				scoreboardUpdate := &model.Scoreboard{}
 				err := json.Unmarshal([]byte(msg.Payload), scoreboardUpdate)
 				if err != nil {
@@ -2851,7 +2860,10 @@ func (r *subscriptionResolver) KothScoreboardUpdate(ctx context.Context) (<-chan
 
 		for {
 			select {
-			case msg := <-kothScoreboardChan:
+			case msg, ok := <-kothScoreboardChan:
+				if !ok {
+					return
+				}
 				kothScoreboardUpdate := &model.KothScoreboard{}
 				err := json.Unmarshal([]byte(msg.Payload), kothScoreboardUpdate)
 				if err != nil {
@@ -2893,7 +2905,10 @@ func (r *subscriptionResolver) MinionUpdate(ctx context.Context) (<-chan *struct
 
 		for {
 			select {
-			case msg := <-minionUpdateSubChan:
+			case msg, ok := <-minionUpdateSubChan:
+				if !ok {
+					return
+				}
 				minionUpdate := &structs.Heartbeat{}
 				err := json.Unmarshal([]byte(msg.Payload), minionUpdate)
 				if err != nil {
@@ -2935,7 +2950,10 @@ func (r *subscriptionResolver) LatestRound(ctx context.Context) (<-chan *ent.Rou
 
 		for {
 			select {
-			case msg := <-latestRoundSubChan:
+			case msg, ok := <-latestRoundSubChan:
+				if !ok {
+					return
+				}
 				latestRound := &ent.Round{}
 				err := json.Unmarshal([]byte(msg.Payload), latestRound)
 				if err != nil {

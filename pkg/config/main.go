@@ -1,10 +1,10 @@
 package config
 
 import (
-	"bytes"
-	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,10 +98,7 @@ var (
 )
 
 func InitMinion() {
-	err := godotenv.Load()
-	if err != nil {
-		logrus.WithError(err).Error("failed to load .env file")
-	}
+	loadEnv()
 
 	domain()
 	port()
@@ -111,10 +108,7 @@ func InitMinion() {
 }
 
 func InitKoth() {
-	err := godotenv.Load()
-	if err != nil {
-		logrus.WithError(err).Error("failed to load .env file")
-	}
+	loadEnv()
 
 	domain()
 	port()
@@ -124,10 +118,7 @@ func InitKoth() {
 }
 
 func InitServer() {
-	err := godotenv.Load()
-	if err != nil {
-		logrus.WithError(err).Error("failed to load .env file")
-	}
+	loadEnv()
 
 	domain()
 	port()
@@ -136,6 +127,13 @@ func InitServer() {
 	postgres()
 	redis()
 	rabbitmqServer()
+}
+
+func loadEnv() {
+	err := godotenv.Load()
+	if err != nil && !os.IsNotExist(err) {
+		logrus.WithError(err).Warn("failed to load .env file")
+	}
 }
 
 func domain() {
@@ -234,10 +232,12 @@ func redis() {
 }
 
 func minionID() {
-	_, err := os.Stat(".minion")
+	path := os.Getenv("MINION_ID_FILE")
+	if path == "" {
+		path = ".minion"
+	}
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		// .minion file does not exist
-
 		minion_id_string := os.Getenv("MINION_ID")
 		if minion_id_string == "" {
 			Minion.ID = uuid.New()
@@ -248,28 +248,14 @@ func minionID() {
 			}
 		}
 
-		file, err := os.Create(".minion")
-		if err != nil {
-			logrus.WithError(err).Fatal("failed to create .minion file")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			logrus.WithError(err).Fatal("failed to create minion state directory")
 		}
-
-		_, err = file.WriteString(Minion.ID.String())
-		if err != nil {
-			logrus.WithError(err).Fatal("failed to write to .minion file")
+		if err := os.WriteFile(path, []byte(Minion.ID.String()), 0600); err != nil {
+			logrus.WithError(err).Fatal("failed to write minion id file")
 		}
 	} else if err == nil {
-		file, err := os.Open(".minion")
-		if err != nil {
-			logrus.WithError(err).Fatal("failed to open .minion file")
-		}
-
-		var out bytes.Buffer
-		_, err = io.Copy(&out, file)
-		if err != nil {
-			logrus.WithError(err).Fatal("failed to read .minion file")
-		}
-
-		Minion.ID, err = uuid.Parse(out.String())
+		Minion.ID, err = uuid.Parse(strings.TrimSpace(string(data)))
 		if err != nil {
 			logrus.WithError(err).Fatal("failed to parse minion id from .minion file")
 		}

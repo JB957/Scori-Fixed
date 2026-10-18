@@ -39,7 +39,11 @@ func workerEnrollQueue(conn *amqp.Connection) (*amqp.Channel, amqp.Queue, error)
 		nil,
 	)
 
-	return ch, q, err
+	if err != nil {
+		_ = ch.Close()
+		return nil, amqp.Queue{}, err
+	}
+	return ch, q, nil
 }
 
 type workerEnrollListener struct {
@@ -64,6 +68,7 @@ func (r *RabbitMQConnections) WorkerEnrollListener(ctx context.Context) (*worker
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -78,9 +83,15 @@ func (r *workerEnrollListener) Close() error {
 }
 
 func (r *workerEnrollListener) Consume(ctx context.Context) (*structs.WorkerEnroll, error) {
-	msg, ok := <-r.msgs
-	if !ok {
-		return nil, fmt.Errorf("channel closed")
+	var msg amqp.Delivery
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case delivery, ok := <-r.msgs:
+		if !ok {
+			return nil, fmt.Errorf("channel closed")
+		}
+		msg = delivery
 	}
 
 	workerEnroll := &structs.WorkerEnroll{}

@@ -23,6 +23,7 @@ func (c *UsersClient) Delete(name string) (*structs.RabbitMQErrorResponse, error
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
 		var errResponse structs.RabbitMQErrorResponse

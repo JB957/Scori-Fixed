@@ -15,6 +15,7 @@ func (c *UsersClient) List() ([]*userResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errResponse structs.RabbitMQErrorResponse

@@ -1,4 +1,4 @@
-import { ReactElement, ReactNode, Suspense } from "react";
+import { ReactElement, ReactNode, Suspense, createContext, lazy, useContext } from "react";
 import { RouterProvider, createBrowserRouter } from "react-router-dom";
 
 import { ApolloClient, NormalizedCacheObject } from "@apollo/client";
@@ -8,29 +8,28 @@ import { enqueueSnackbar } from "notistack";
 import { Admin, Authenticated, Error, Main, User } from "./components";
 import { AuthContext } from "./components/Context/AuthProvider";
 import {
+  EngineState,
   useEngineStateSubscription,
   useGlobalNotificationSubscription,
 } from "./graph";
 import { useAuth } from "./hooks";
-import {
-  AdminChecks,
-  AdminKoth,
-  Minions,
-  AdminPanel,
-  ChangePassword,
-  Home,
-  Injects,
-  Login,
-  Me,
-  Scoreboard,
-  ScoreboardRound,
-  UserChecks,
-  UserInjects,
-  Users,
-  KothScoreboard,
-  KothScoreboardRound,
-} from "./pages";
-import Statuses from "./pages/Statuses";
+const AdminChecks = lazy(() => import("./pages/Admin/Checks"));
+const AdminKoth = lazy(() => import("./pages/Admin/Koth"));
+const Minions = lazy(() => import("./pages/Admin/Minions"));
+const AdminPanel = lazy(() => import("./pages/Admin/AdminPanel"));
+const ChangePassword = lazy(() => import("./pages/ChangePassword"));
+const Home = lazy(() => import("./pages/Home"));
+const Injects = lazy(() => import("./pages/Admin/Injects"));
+const Login = lazy(() => import("./pages/Login"));
+const Me = lazy(() => import("./pages/Me"));
+const Scoreboard = lazy(() => import("./pages/Scoreboard/Scoreboard"));
+const ScoreboardRound = lazy(() => import("./pages/Scoreboard/Round"));
+const UserChecks = lazy(() => import("./pages/User/Checks"));
+const UserInjects = lazy(() => import("./pages/User/Injects"));
+const Users = lazy(() => import("./pages/Admin/Users"));
+const KothScoreboard = lazy(() => import("./pages/Scoreboard/KothScoreboard"));
+const KothScoreboardRound = lazy(() => import("./pages/Scoreboard/KothRound"));
+const Statuses = lazy(() => import("./pages/Statuses"));
 
 const LazyComponent = ({ element }: { element: ReactNode }): ReactElement => {
   return <Suspense fallback={<CircularProgress />}>{element}</Suspense>;
@@ -42,48 +41,52 @@ type props = {
   apolloClient: ApolloClient<NormalizedCacheObject>;
 };
 
-export function Router({ theme, setTheme, apolloClient }: props) {
-  const {
-    jwt,
-    me,
-    meLoading,
-    meError,
-    cookies,
-    setCookie,
-    removeCookie,
-    updateCookie,
-  } = useAuth(apolloClient);
+type ShellState = Pick<props, "theme" | "setTheme"> & { engineState?: EngineState };
+const ShellContext = createContext<ShellState | null>(null);
 
-  useGlobalNotificationSubscription({
-    onData: (data) => {
-      if (data.data.data?.globalNotification) {
-        enqueueSnackbar(data.data.data.globalNotification.message, {
-          variant: data.data.data.globalNotification.type,
-        });
-      }
-    },
-    onError: (error) => {
-      console.error(error);
-    },
-  });
+function useShell(): ShellState {
+  const shell = useContext(ShellContext);
+  if (!shell) throw new globalThis.Error("Router shell is missing");
+  return shell;
+}
 
-  const { data: engineState } = useEngineStateSubscription({
-    onError: (error) => {
-      console.error(error);
-    },
-  });
+function MainRoute() {
+  const { theme, setTheme, engineState } = useShell();
+  return <Main theme={theme} setTheme={setTheme} engineState={engineState} />;
+}
 
-  const router = createBrowserRouter([
+function ScoreboardRoute() {
+  const { theme } = useShell();
+  return <Scoreboard theme={theme} />;
+}
+
+function ScoreboardRoundRoute() {
+  const { theme } = useShell();
+  return <ScoreboardRound theme={theme} />;
+}
+
+function KothScoreboardRoute() {
+  const { theme } = useShell();
+  return <KothScoreboard theme={theme} />;
+}
+
+function KothScoreboardRoundRoute() {
+  const { theme } = useShell();
+  return <KothScoreboardRound theme={theme} />;
+}
+
+function AdminPanelRoute() {
+  const { engineState } = useShell();
+  return <AdminPanel engineState={engineState} />;
+}
+
+const router = createBrowserRouter([
     {
       path: "/",
       element: (
         <LazyComponent
           element={
-            <Main
-              theme={theme}
-              setTheme={setTheme}
-              engineState={engineState?.engineState}
-            />
+            <MainRoute />
           }
         />
       ),
@@ -118,12 +121,12 @@ export function Router({ theme, setTheme, apolloClient }: props) {
           children: [
             {
               index: true,
-              element: <LazyComponent element={<Scoreboard theme={theme} />} />,
+              element: <LazyComponent element={<ScoreboardRoute />} />,
             },
             {
               path: ":round",
               element: (
-                <LazyComponent element={<ScoreboardRound theme={theme} />} />
+                <LazyComponent element={<ScoreboardRoundRoute />} />
               ),
             },
           ],
@@ -134,14 +137,14 @@ export function Router({ theme, setTheme, apolloClient }: props) {
             {
               index: true,
               element: (
-                <LazyComponent element={<KothScoreboard theme={theme} />} />
+                <LazyComponent element={<KothScoreboardRoute />} />
               ),
             },
             {
               path: ":round",
               element: (
                 <LazyComponent
-                  element={<KothScoreboardRound theme={theme} />}
+                  element={<KothScoreboardRoundRoute />}
                 />
               ),
             },
@@ -156,7 +159,7 @@ export function Router({ theme, setTheme, apolloClient }: props) {
               element: (
                 <LazyComponent
                   element={
-                    <AdminPanel engineState={engineState?.engineState} />
+                    <AdminPanelRoute />
                   }
                 />
               ),
@@ -208,6 +211,39 @@ export function Router({ theme, setTheme, apolloClient }: props) {
     },
   ]);
 
+export function Router({ theme, setTheme, apolloClient }: props) {
+  const {
+    jwt,
+    me,
+    meLoading,
+    meError,
+    cookies,
+    setCookie,
+    removeCookie,
+    updateCookie,
+  } = useAuth(apolloClient);
+
+  useGlobalNotificationSubscription({
+    onData: (data) => {
+      if (data.data.data?.globalNotification) {
+        enqueueSnackbar(data.data.data.globalNotification.message, {
+          variant: data.data.data.globalNotification.type,
+        });
+      }
+    },
+    onError: (error) => {
+      console.error(error);
+    },
+  });
+
+  const { data: engineState } = useEngineStateSubscription({
+    onError: (error) => {
+      console.error(error);
+    },
+  });
+
+
+
   return (
     <AuthContext.Provider
       value={{
@@ -221,7 +257,9 @@ export function Router({ theme, setTheme, apolloClient }: props) {
         meError,
       }}
     >
-      <RouterProvider router={router} />
+      <ShellContext.Provider value={{ theme, setTheme, engineState: engineState?.engineState }}>
+        <RouterProvider router={router} />
+      </ShellContext.Provider>
     </AuthContext.Provider>
   );
 }

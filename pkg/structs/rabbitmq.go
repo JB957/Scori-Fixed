@@ -84,8 +84,6 @@ const (
 )
 
 func readableBytes(bytes int64) string {
-	bytes = bytes * 1024
-
 	if bytes < KB {
 		return fmt.Sprintf("%dB", bytes)
 	}
@@ -95,5 +93,8 @@ func readableBytes(bytes int64) string {
 	if bytes < GB {
 		return fmt.Sprintf("%.2fMB", float64(bytes)/MB)
 	}
-	return fmt.Sprintf("%.2fGB", float64(bytes)/TB)
+	if bytes < TB {
+		return fmt.Sprintf("%.2fGB", float64(bytes)/GB)
+	}
+	return fmt.Sprintf("%.2fTB", float64(bytes)/TB)
 }

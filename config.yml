@@ -1,16 +1,16 @@
 ---
 checks:
-  check_template: github.com/scorify/check-template@v1.0.3
-  ping: github.com/scorify/ping@v1.0.2
-  http: github.com/scorify/http@v0.0.8
-  ssh: github.com/scorify/ssh@v0.0.2
-  dns: github.com/scorify/dns@v0.0.3
-  ftp: github.com/scorify/ftp@v0.0.2
-  ldap: github.com/scorify/ldap@v0.0.3
-  mysql: github.com/scorify/mysql@v0.0.2
-  smb: github.com/scorify/smb@v0.0.3
-  winrm: github.com/scorify/winrm@v0.0.2
-  tcp: github.com/scorify/tcp@v0.0.1
-  smtp: github.com/scorify/smtp@v0.0.0
-  imap: github.com/scorify/imap@v0.0.1
-  nc: github.com/scorify/nc@v0.0.0
+  check_template: github.com/scorify/scorify/pkg/localchecks/check-template
+  ping: github.com/scorify/scorify/pkg/localchecks/ping
+  http: github.com/scorify/scorify/pkg/localchecks/http
+  ssh: github.com/scorify/scorify/pkg/localchecks/ssh
+  dns: github.com/scorify/scorify/pkg/localchecks/dns
+  ftp: github.com/scorify/scorify/pkg/localchecks/ftp
+  ldap: github.com/scorify/scorify/pkg/localchecks/ldap
+  mysql: github.com/scorify/scorify/pkg/localchecks/mysql
+  smb: github.com/scorify/scorify/pkg/localchecks/smb
+  winrm: github.com/scorify/scorify/pkg/localchecks/winrm
+  tcp: github.com/scorify/scorify/pkg/localchecks/tcp
+  smtp: github.com/scorify/scorify/pkg/localchecks/smtp
+  imap: github.com/scorify/scorify/pkg/localchecks/imap
+  nc: github.com/scorify/scorify/pkg/localchecks/nc

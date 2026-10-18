@@ -4,9 +4,9 @@ WORKDIR /app
 COPY go.mod go.sum main.go /app/
 COPY pkg /app/pkg
 
-RUN go mod download && go build -o /app/scorify main.go
+RUN go mod download && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /app/scorify main.go
 
-FROM docker.io/library/golang:1.24
+FROM docker.io/library/debian:bookworm-slim
 
 # Copy any custom CA certificates from the host
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \

@@ -17,6 +17,7 @@ import { enqueueSnackbar } from "notistack";
 import { KothScoreboardWrapper } from "../../components";
 import { AuthContext } from "../../components/Context";
 import { NormalScoreboardTheme } from "../../constants";
+import RoundCountdown from "../../components/Scoreboard/RoundCountdown";
 import {
   KothScoreboardQuery,
   Role,
@@ -33,16 +34,10 @@ export default function KothScoreboardPage({ theme }: props) {
 
   const { me } = useContext(AuthContext);
 
-  const { data: rawData, error, loading, refetch } = useKothScoreboardQuery();
+  const { data: rawData, error, loading } = useKothScoreboardQuery();
   const [data, setData] = useState<
     KothScoreboardQuery["kothScoreboard"] | undefined
   >(rawData?.kothScoreboard || undefined);
-
-  useEffect(() => {
-    refetch();
-    refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only effect
-  }, []);
 
   useEffect(() => {
     if (rawData?.kothScoreboard) {
@@ -114,6 +109,7 @@ export default function KothScoreboardPage({ theme }: props) {
           <KeyboardArrowLeft sx={{ visibility: "hidden" }} />
           <KeyboardDoubleArrowLeft sx={{ visibility: "hidden" }} />
         </Box>
+        <RoundCountdown />
         {me && me.me && me.me.role === Role.User && (
           <Button
             variant='contained'

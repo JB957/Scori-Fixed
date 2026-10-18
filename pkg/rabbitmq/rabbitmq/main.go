@@ -2,7 +2,11 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -26,50 +30,31 @@ type RabbitMQConnections struct {
 }
 
 func (r *RabbitMQConnections) Close() error {
-	err := r.Heartbeat.Close()
-	if err != nil {
-		return err
+	var closeErrors []error
+	for _, conn := range []*amqp.Connection{
+		r.Heartbeat, r.TaskRequest, r.TaskResponse, r.WorkerEnroll,
+		r.WorkerStatus, r.KothTaskResponse, r.KothTaskRequest,
+	} {
+		if conn != nil {
+			if err := conn.Close(); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
+		}
 	}
-
-	err = r.TaskRequest.Close()
-	if err != nil {
-		return err
-	}
-
-	err = r.TaskResponse.Close()
-	if err != nil {
-		return err
-	}
-
-	err = r.WorkerEnroll.Close()
-	if err != nil {
-		return err
-	}
-
-	err = r.WorkerStatus.Close()
-	if err != nil {
-		return err
-	}
-
-	err = r.KothTaskResponse.Close()
-	if err != nil {
-		return err
-	}
-
-	return r.KothTaskRequest.Close()
+	return errors.Join(closeErrors...)
 }
 
 func openConnection(vhost string, username string, password string) (*amqp.Connection, error) {
-	connStr := fmt.Sprintf(
-		"amqp://%s:%s@%s:%d/%s",
-		username,
-		password,
-		config.RabbitMQ.Host,
-		config.RabbitMQ.Port,
-		vhost,
-	)
-
-	conn, err := amqp.Dial(connStr)
+	connStr := (&url.URL{
+		Scheme: "amqp",
+		User:   url.UserPassword(username, password),
+		Host:   net.JoinHostPort(config.RabbitMQ.Host, fmt.Sprint(config.RabbitMQ.Port)),
+		Path:   "/" + vhost,
+	}).String()
+	conn, err := amqp.DialConfig(connStr, amqp.Config{
+		Heartbeat: 10 * time.Second,
+		Dial:      amqp.DefaultDial(10 * time.Second),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -78,41 +63,58 @@ func openConnection(vhost string, username string, password string) (*amqp.Conne
 }
 
 func Client(username string, password string) (*RabbitMQConnections, error) {
-	heartbeatConn, err := openConnection(HeartbeatVhost, username, password)
+	opened := make([]*amqp.Connection, 0, 7)
+	cleanup := true
+	defer func() {
+		if cleanup {
+			for _, conn := range opened {
+				_ = conn.Close()
+			}
+		}
+	}()
+	open := func(vhost string) (*amqp.Connection, error) {
+		conn, err := openConnection(vhost, username, password)
+		if err == nil {
+			opened = append(opened, conn)
+		}
+		return conn, err
+	}
+	heartbeatConn, err := open(HeartbeatVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	taskRequestsConn, err := openConnection(TaskRequestVhost, username, password)
+	taskRequestsConn, err := open(TaskRequestVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	taskResponsesConn, err := openConnection(TaskResponseVhost, username, password)
+	taskResponsesConn, err := open(TaskResponseVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	workerEnrollConn, err := openConnection(WorkerEnrollVhost, username, password)
+	workerEnrollConn, err := open(WorkerEnrollVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	workerStatusConn, err := openConnection(WorkerStatusVhost, username, password)
+	workerStatusConn, err := open(WorkerStatusVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	kothTaskRequestConn, err := openConnection(KothTaskRequestVhost, username, password)
+	kothTaskRequestConn, err := open(KothTaskRequestVhost)
 	if err != nil {
 		return nil, err
 	}
 
-	kothTaskResponseConn, err := openConnection(KothTaskResponseVhost, username, password)
+	kothTaskResponseConn, err := open(KothTaskResponseVhost)
 	if err != nil {
 		return nil, err
 	}
 
+	cleanup = false
 	return &RabbitMQConnections{
 		Heartbeat:        heartbeatConn,
 		TaskRequest:      taskRequestsConn,
@@ -139,20 +141,36 @@ func Serve(
 		return err
 	}
 	defer rabbitmqClient.Close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	logrus.Info("Connected to RabbitMQ server")
+	var workers sync.WaitGroup
+	launch := func(fn func()) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer cancel()
+			fn()
+		}()
+	}
 
-	go func() {
+	launch(func() {
 		heartbeatListener, err := rabbitmqClient.HeartbeatListener(ctx)
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create heartbeat listener")
+			logrus.WithError(err).Error("failed to create heartbeat listener")
+			return
 		}
 		defer heartbeatListener.Close()
 
 		for {
 			heartbeat, err := heartbeatListener.Consume(ctx)
 			if err != nil {
-				logrus.WithError(err).Fatal("failed to consume heartbeat")
+				if ctx.Err() != nil {
+					return
+				}
+				logrus.WithError(err).Error("failed to consume heartbeat")
+				return
 			}
 
 			heartbeat.Timestamp = time.Now()
@@ -181,12 +199,13 @@ func Serve(
 				logrus.WithError(err).Error("failed to publish minion metrics")
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		taskRequestClient, err := rabbitmqClient.TaskRequestClient()
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create task request client")
+			logrus.WithError(err).Error("failed to create task request client")
+			return
 		}
 		defer taskRequestClient.Close()
 
@@ -197,23 +216,29 @@ func Serve(
 			case taskRequest := <-taskRequestChan:
 				err := taskRequestClient.Publish(ctx, taskRequest)
 				if err != nil {
-					logrus.WithError(err).Fatal("failed to send task request")
+					logrus.WithError(err).Error("failed to send task request")
+					return
 				}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		taskResponseListener, err := rabbitmqClient.TaskResponseListener(ctx)
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create task response listener")
+			logrus.WithError(err).Error("failed to create task response listener")
+			return
 		}
 		defer taskResponseListener.Close()
 
 		for {
 			taskResponse, err := taskResponseListener.Consume(ctx)
 			if err != nil {
-				logrus.WithError(err).Fatal("failed to consume task response")
+				if ctx.Err() != nil {
+					return
+				}
+				logrus.WithError(err).Error("failed to consume task response")
+				return
 			}
 
 			select {
@@ -222,19 +247,24 @@ func Serve(
 			case taskResponseChan <- taskResponse:
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		workerEnrollListener, err := rabbitmqClient.WorkerEnrollListener(ctx)
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create worker enroll listener")
+			logrus.WithError(err).Error("failed to create worker enroll listener")
+			return
 		}
 		defer workerEnrollListener.Close()
 
 		for {
 			workerEnroll, err := workerEnrollListener.Consume(ctx)
 			if err != nil {
-				logrus.WithError(err).Fatal("failed to consume worker enroll")
+				if ctx.Err() != nil {
+					return
+				}
+				logrus.WithError(err).Error("failed to consume worker enroll")
+				return
 			}
 
 			exists, err := entClient.Minion.
@@ -270,13 +300,15 @@ func Serve(
 				}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		workerStatusClient, err := rabbitmqClient.WorkerStatusClient()
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create worker status client")
+			logrus.WithError(err).Error("failed to create worker status client")
+			return
 		}
+		defer workerStatusClient.Close()
 
 		for {
 			select {
@@ -285,16 +317,18 @@ func Serve(
 			case workerStatus := <-workerStatusChan:
 				err := workerStatusClient.Publish(ctx, workerStatus)
 				if err != nil {
-					logrus.WithError(err).Fatal("failed to send worker status")
+					logrus.WithError(err).Error("failed to send worker status")
+					return
 				}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		kothTaskRequestClient, err := rabbitmqClient.KothTaskRequestClient()
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create koth task request client")
+			logrus.WithError(err).Error("failed to create koth task request client")
+			return
 		}
 		defer kothTaskRequestClient.Close()
 
@@ -305,23 +339,29 @@ func Serve(
 			case kothTaskRequest := <-kothStatusRequestChan:
 				err := kothTaskRequestClient.Publish(ctx, kothTaskRequest.RoutingKey, &kothTaskRequest.KothTaskRequest)
 				if err != nil {
-					logrus.WithError(err).Fatal("failed to send koth task request")
+					logrus.WithError(err).Error("failed to send koth task request")
+					return
 				}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	launch(func() {
 		kothTaskResponseListener, err := rabbitmqClient.KothTaskResponseListener(ctx)
 		if err != nil {
-			logrus.WithError(err).Fatal("failed to create koth task response listener")
+			logrus.WithError(err).Error("failed to create koth task response listener")
+			return
 		}
 		defer kothTaskResponseListener.Close()
 
 		for {
 			kothTaskResponse, err := kothTaskResponseListener.Consume(ctx)
 			if err != nil {
-				logrus.WithError(err).Fatal("failed to consume koth task response")
+				if ctx.Err() != nil {
+					return
+				}
+				logrus.WithError(err).Error("failed to consume koth task response")
+				return
 			}
 
 			select {
@@ -330,9 +370,10 @@ func Serve(
 			case kothStatusResponseChan <- kothTaskResponse:
 			}
 		}
-	}()
+	})
 
 	<-ctx.Done()
+	workers.Wait()
 
 	return nil
 }

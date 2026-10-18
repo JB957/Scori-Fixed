@@ -16,6 +16,7 @@ import {
 } from "../../graph";
 import { KothScoreboardWrapper } from "../../components";
 import { NormalScoreboardTheme } from "../../constants";
+import RoundCountdown from "../../components/Scoreboard/RoundCountdown";
 
 type params = {
   round: string;
@@ -32,15 +33,9 @@ export default function KothScoreboardRoundPage({ theme }: props) {
   const [latestRound, setLatestRound] =
     useState<LatestRoundSubscription["latestRound"]["number"]>();
 
-  const { data, error, loading, refetch } = useKothScoreboardQuery({
+  const { data, error, loading } = useKothScoreboardQuery({
     variables: { round: round ? parseInt(round) : undefined },
   });
-
-  useEffect(() => {
-    refetch();
-    refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only effect
-  }, []);
 
   useLatestRoundSubscription({
     onError: (error) => {
@@ -159,6 +154,7 @@ export default function KothScoreboardRoundPage({ theme }: props) {
             <KeyboardDoubleArrowRight sx={{ visibility: "hidden" }} />
           )}
         </Box>
+        <RoundCountdown />
         <Box m={2} />
         {error && <Typography variant='h6'>Error: {error.message}</Typography>}
         {loading && !data && <CircularProgress />}

@@ -6,7 +6,7 @@ import (
 	"github.com/scorify/scorify/pkg/cmd"
 )
 
-//go:generate go run -mod=mod github.com/scorify/generate
+//go:generate go run ./tools/checkgen
 
 func main() {
 	if err := cmd.Execute(); err != nil {

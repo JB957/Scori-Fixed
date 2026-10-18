@@ -1,4 +1,4 @@
-# Scorify
+# Scori-Fixed
 
 > [!NOTE]
 > Real documentation is coming soon, I promise :tm:
@@ -22,8 +22,8 @@ export PATH=$PATH:/usr/local/go/bin
 ### 2. Clone Repo
 
 ```
-git clone https://github.com/Scorify/Scorify.git
-cd Scorify
+git clone https://github.com/JB957/Scori-Fixed.git
+cd Scori-Fixed
 ```
 
 ### 3. Run Setup Script
@@ -41,7 +41,7 @@ go run main.go setup
 ### 4. Start Scorify
 
 ```
-docker compose up -d
+docker compose up -d --build
 ```
 
 You can now visit the Scorify webapp at the domain/ip you provided during the setup script
@@ -57,3 +57,5 @@ docker compose build
 docker compose down
 docker compose up -d
 ```
+
+For the resource and leak fixes, the original branch comparison, profiling instructions, and verification results, see [RESOURCE_CHANGES.md](RESOURCE_CHANGES.md).

@@ -9,6 +9,7 @@ import { Box, CircularProgress, Container, Typography } from "@mui/material";
 
 import { ScoreboardWrapper } from "../../components";
 import { NormalScoreboardTheme } from "../../constants";
+import RoundCountdown from "../../components/Scoreboard/RoundCountdown";
 import {
   ScoreboardQuery,
   useScoreboardQuery,
@@ -22,16 +23,10 @@ type props = {
 export default function ScoreboardPage({ theme }: props) {
   const navigate = useNavigate();
 
-  const { data: rawData, error, loading, refetch } = useScoreboardQuery();
+  const { data: rawData, error, loading } = useScoreboardQuery();
   const [data, setData] = useState<ScoreboardQuery["scoreboard"] | undefined>(
     rawData?.scoreboard
   );
-
-  useEffect(() => {
-    refetch();
-    refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only effect
-  }, []);
 
   useEffect(() => {
     setData(rawData?.scoreboard);
@@ -101,6 +96,7 @@ export default function ScoreboardPage({ theme }: props) {
           <KeyboardArrowLeft sx={{ visibility: "hidden" }} />
           <KeyboardDoubleArrowLeft sx={{ visibility: "hidden" }} />
         </Box>
+        <RoundCountdown />
         <Box m={2} />
         {error && <Typography variant='h6'>Error: {error.message}</Typography>}
         {loading && !data && <CircularProgress />}

@@ -7,11 +7,13 @@ ENV VITE_DOMAIN=$DOMAIN
 ENV VITE_PORT=$PORT
 
 WORKDIR /app
-COPY package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json index.html /app/
+COPY package.json package-lock.json codegen.ts vite.config.ts tsconfig.json tsconfig.node.json index.html /app/
+RUN npm ci --no-audit --no-fund
 COPY src /app/src
+COPY pkg/graph/schema.graphqls /app/pkg/graph/schema.graphqls
 COPY public /app/public
 
-RUN npm install && npm run build
+RUN npm run generate && npm run build
 
 FROM caddy:2.8.4-alpine
 

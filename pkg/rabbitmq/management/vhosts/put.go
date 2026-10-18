@@ -39,6 +39,7 @@ func (c *VhostsClient) Put(name string, description string, tags []string, defau
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		var errResponse structs.RabbitMQErrorResponse

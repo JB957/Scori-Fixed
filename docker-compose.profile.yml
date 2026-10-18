@@ -1,0 +1,7 @@
+services:
+  scorify:
+    ports:
+      - "127.0.0.1:6061:6060"
+  minion:
+    ports:
+      - "127.0.0.1:6060:6060"

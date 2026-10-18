@@ -18,6 +18,7 @@ func (c *UsersClient) Get(name string) (*userResponse, *structs.RabbitMQErrorRes
 	if err != nil {
 		return nil, nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errResponse structs.RabbitMQErrorResponse

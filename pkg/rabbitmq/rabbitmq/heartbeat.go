@@ -3,14 +3,15 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"runtime"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/scorify/scorify/pkg/config"
 	"github.com/scorify/scorify/pkg/structs"
-	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
+	"github.com/shirou/gopsutil/process"
 	"github.com/sirupsen/logrus"
 )
 
@@ -41,7 +42,11 @@ func heartbeatQueue(conn *amqp.Connection) (*amqp.Channel, amqp.Queue, error) {
 		nil,
 	)
 
-	return ch, q, err
+	if err != nil {
+		_ = ch.Close()
+		return nil, amqp.Queue{}, err
+	}
+	return ch, q, nil
 }
 
 type heartbeatListener struct {
@@ -66,6 +71,7 @@ func (r *RabbitMQConnections) HeartbeatListener(ctx context.Context) (*heartbeat
 		nil,
 	)
 	if err != nil {
+		_ = ch.Close()
 		return nil, err
 	}
 
@@ -82,8 +88,11 @@ func (l *heartbeatListener) Close() error {
 func (l *heartbeatListener) Consume(ctx context.Context) (*structs.Heartbeat, error) {
 	select {
 	case <-ctx.Done():
-		return nil, nil
-	case msg := <-l.msgs:
+		return nil, ctx.Err()
+	case msg, ok := <-l.msgs:
+		if !ok {
+			return nil, context.Canceled
+		}
 		var heartbeat structs.Heartbeat
 		err := json.Unmarshal(msg.Body, &heartbeat)
 		if err != nil {
@@ -95,8 +104,10 @@ func (l *heartbeatListener) Consume(ctx context.Context) (*structs.Heartbeat, er
 }
 
 type heartbeatClient struct {
-	ch *amqp.Channel
-	q  amqp.Queue
+	ch         *amqp.Channel
+	q          amqp.Queue
+	lastCPU    float64
+	lastSample time.Time
 }
 
 func (r *RabbitMQConnections) HeartbeatClient() (*heartbeatClient, error) {
@@ -118,21 +129,38 @@ func (c *heartbeatClient) Close() error {
 func (c *heartbeatClient) SendHeartbeat(ctx context.Context) error {
 	start := time.Now()
 
-	cpuUsage, err := cpu.Percent(0, false)
+	proc, err := process.NewProcess(int32(os.Getpid()))
 	if err != nil {
 		return err
 	}
-
-	memoryStats, err := mem.VirtualMemory()
+	memoryInfo, err := proc.MemoryInfoWithContext(ctx)
 	if err != nil {
 		return err
 	}
+	memoryStats, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return err
+	}
+	cpuTimes, err := proc.TimesWithContext(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	cpuUsage := 0.0
+	if !c.lastSample.IsZero() {
+		elapsed := now.Sub(c.lastSample).Seconds()
+		if elapsed > 0 {
+			cpuUsage = max(0, min(100, 100*(cpuTimes.Total()-c.lastCPU)/elapsed/float64(runtime.NumCPU())))
+		}
+	}
+	c.lastCPU = cpuTimes.Total()
+	c.lastSample = now
 
 	metrics := structs.Heartbeat{
 		MinionID:    config.Minion.ID,
-		MemoryUsage: int64(memoryStats.Active),
+		MemoryUsage: int64(memoryInfo.RSS),
 		MemoryTotal: int64(memoryStats.Total),
-		CPUUsage:    cpuUsage[0],
+		CPUUsage:    cpuUsage,
 		Goroutines:  int64(runtime.NumGoroutine()),
 	}
 
@@ -156,7 +184,6 @@ func (c *heartbeatClient) SendHeartbeat(ctx context.Context) error {
 		return err
 	}
 
-	now := time.Now()
 	logrus.WithField("time", now).Infof("Heartbeat sent to server in %s", now.Sub(start))
 
 	return nil

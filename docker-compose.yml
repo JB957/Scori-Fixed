@@ -60,14 +60,19 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
       RABBITMQ_MINION_USER: ${RABBITMQ_MINION_USER}
       RABBITMQ_MINION_PASS: ${RABBITMQ_MINION_PASS}
+      SCORIFY_PPROF_ADDR: ${SCORIFY_PPROF_ADDR:-}
   minion:
     container_name: scorify-minion
     build:
       context: .
       dockerfile: Dockerfile.scorify
     restart: unless-stopped
+    volumes:
+      - scorify-minion:/app/state
     command: ["minion"]
     environment:
+      MINION_ID_FILE: /app/state/.minion
+      MINION_ID: ${MINION_ID:-}
       DOMAIN: ${DOMAIN}
       PORT: ${PORT}
       INTERVAL: ${INTERVAL}
@@ -77,6 +82,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
       RABBITMQ_MINION_USER: ${RABBITMQ_MINION_USER}
       RABBITMQ_MINION_PASS: ${RABBITMQ_MINION_PASS}
+      SCORIFY_PPROF_ADDR: ${SCORIFY_PPROF_ADDR:-}
   frontend:
     container_name: scorify-frontend
     build:
@@ -117,5 +123,6 @@ volumes:
   scorify-redis:
   scorify-postgres:
   scorify-server:
+  scorify-minion:
   scorify-caddy-data:
   scorify-caddy-config:

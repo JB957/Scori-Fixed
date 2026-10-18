@@ -23,6 +23,7 @@ func (c *VhostsClient) Delete(vhost string) (*structs.RabbitMQErrorResponse, err
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
 		var errResponse structs.RabbitMQErrorResponse

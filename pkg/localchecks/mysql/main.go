@@ -72,6 +72,7 @@ func Run(ctx context.Context, config string) error {
 		User: conf.Username, Passwd: conf.Password, Net: "tcp",
 		Addr: net.JoinHostPort(conf.Server, fmt.Sprint(conf.Port)), DBName: conf.Database,
 		Timeout: timeout, ReadTimeout: timeout, WriteTimeout: timeout,
+		AllowNativePasswords: true,
 	}).FormatDSN()
 
 	conn, err := sql.Open("mysql", connStr)

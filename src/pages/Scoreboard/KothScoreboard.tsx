@@ -17,6 +17,7 @@ import { enqueueSnackbar } from "notistack";
 import { KothScoreboardWrapper } from "../../components";
 import { AuthContext } from "../../components/Context";
 import { NormalScoreboardTheme } from "../../constants";
+import RoundCountdown from "../../components/Scoreboard/RoundCountdown";
 import {
   KothScoreboardQuery,
   Role,
@@ -108,6 +109,7 @@ export default function KothScoreboardPage({ theme }: props) {
           <KeyboardArrowLeft sx={{ visibility: "hidden" }} />
           <KeyboardDoubleArrowLeft sx={{ visibility: "hidden" }} />
         </Box>
+        <RoundCountdown />
         {me && me.me && me.me.role === Role.User && (
           <Button
             variant='contained'

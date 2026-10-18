@@ -11,6 +11,7 @@ import { Box, CircularProgress, Container, Typography } from "@mui/material";
 
 import { ScoreboardWrapper } from "../../components";
 import { NormalScoreboardTheme } from "../../constants";
+import RoundCountdown from "../../components/Scoreboard/RoundCountdown";
 import {
   LatestRoundSubscription,
   useLatestRoundSubscription,
@@ -145,6 +146,7 @@ export default function ScoreboardRoundPage({ theme }: props) {
             <KeyboardDoubleArrowRight sx={{ visibility: "hidden" }} />
           )}
         </Box>
+        <RoundCountdown />
         <Box m={2} />
         {error && <Typography variant='h6'>Error: {error.message}</Typography>}
         {loading && !data && <CircularProgress />}

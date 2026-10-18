@@ -67,8 +67,12 @@ func (file *File) WriteFile(fileType FileType, parentID uuid.UUID, reader io.Rea
 		return err
 	}
 
-	_, err = io.Copy(fileHandle, reader)
-	return err
+	_, copyErr := io.Copy(fileHandle, reader)
+	closeErr := fileHandle.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func (file *File) DeleteFile(fileType FileType, parentID uuid.UUID) error {

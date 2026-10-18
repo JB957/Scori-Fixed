@@ -3,6 +3,8 @@ package koth
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -150,6 +152,9 @@ func kothLoop(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections)
 			} else if scoringCancel == nil {
 				startScoring()
 			}
+		case <-scoringDone:
+			stopScoring()
+			return fmt.Errorf("koth scoring listener stopped")
 		}
 	}
 }
@@ -178,11 +183,23 @@ func scoreKoth(ctx context.Context, RabbitMQClient *rabbitmq.RabbitMQConnections
 		}
 
 		// read file
-		content, err := os.ReadFile(taskRequest.Filename)
+		file, err := os.Open(taskRequest.Filename)
+		var content []byte
+		if err == nil {
+			content, err = io.ReadAll(io.LimitReader(file, 1<<20+1))
+			closeErr := file.Close()
+			if err == nil {
+				err = closeErr
+			}
+			if err == nil && len(content) > 1<<20 {
+				err = fmt.Errorf("koth file exceeds 1 MiB check limit")
+			}
+		}
 		if err != nil {
 			logrus.WithError(err).Error("failed to read file")
 			err = kothTaskResponseClient.SubmitKothTaskResponse(ctx, &structs.KothTaskResponse{
 				StatusID: taskRequest.StatusID,
+				MinionID: config.Minion.ID,
 				Error:    err.Error(),
 			})
 			if err != nil {
@@ -194,6 +211,7 @@ func scoreKoth(ctx context.Context, RabbitMQClient *rabbitmq.RabbitMQConnections
 		// submit task response
 		err = kothTaskResponseClient.SubmitKothTaskResponse(ctx, &structs.KothTaskResponse{
 			StatusID: taskRequest.StatusID,
+			MinionID: config.Minion.ID,
 			Content:  string(bytes.TrimSpace(content)),
 		})
 		if err != nil {

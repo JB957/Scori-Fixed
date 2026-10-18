@@ -2,6 +2,7 @@ package minion
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -77,7 +78,9 @@ func mainLoop(ctx context.Context) {
 
 	// Run minion loop, retry with backoff on failure
 	// Exit mainLoop when backoff reaches max (connection likely unhealthy)
-	minionLoop(ctx, rabbitmqClient, heartbeatSuccess)
+	if err := minionLoop(ctx, rabbitmqClient, heartbeatSuccess); err != nil && ctx.Err() == nil {
+		logrus.WithError(err).Warn("minion loop stopped")
+	}
 	for ctx.Err() == nil {
 		currentBackOff := time.Duration(backOff.Load())
 		if currentBackOff >= time.Minute {
@@ -92,37 +95,39 @@ func mainLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		minionLoop(ctx, rabbitmqClient, heartbeatSuccess)
+		if err := minionLoop(ctx, rabbitmqClient, heartbeatSuccess); err != nil && ctx.Err() == nil {
+			logrus.WithError(err).Warn("minion loop stopped")
+		}
 
 		newBackOff := backOff.Load() * 2
 		backOff.Store(min(newBackOff, int64(time.Minute)))
 	}
 }
 
-func minionLoop(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections, heartbeatSuccess chan struct{}) {
+func minionLoop(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections, heartbeatSuccess chan struct{}) error {
 	minionCtx, minionCancel := context.WithCancel(ctx)
 	defer minionCancel()
 
 	workerEnrollClient, err := rabbitmqClient.WorkerEnrollClient()
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to create worker enroll client")
+		return fmt.Errorf("create worker enroll client: %w", err)
 	}
 
 	err = workerEnrollClient.EnrollMinion(minionCtx, minion.RoleService)
+	_ = workerEnrollClient.Close()
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to enroll minion")
+		return fmt.Errorf("enroll minion: %w", err)
 	}
-	workerEnrollClient.Close()
 
 	heartbeatClient, err := rabbitmqClient.HeartbeatClient()
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to create heartbeat client")
+		return fmt.Errorf("create heartbeat client: %w", err)
 	}
 	defer heartbeatClient.Close()
 
 	workerStatusListener, err := rabbitmqClient.WorkerStatusListener(minionCtx)
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to create worker status listener")
+		return fmt.Errorf("create worker status listener: %w", err)
 	}
 	defer workerStatusListener.Close()
 
@@ -133,55 +138,64 @@ func minionLoop(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnection
 
 	err = heartbeatClient.SendHeartbeat(minionCtx)
 	if err != nil {
-		logrus.WithError(err).Error("failed to send heartbeat")
-		return
+		return fmt.Errorf("send heartbeat: %w", err)
 	}
 
-	heartbeatSuccess <- struct{}{}
+	select {
+	case heartbeatSuccess <- struct{}{}:
+	default:
+	}
 
-	scoringCtx, scoringCtxCancel := context.WithCancel(minionCtx)
-	defer func() { scoringCtxCancel() }()
-
-	scoring := true
-
-	go score(scoringCtx, rabbitmqClient)
+	var scoringCancel context.CancelFunc
+	var scoringDone chan struct{}
+	startScoring := func() {
+		scoringCtx, cancel := context.WithCancel(minionCtx)
+		scoringCancel = cancel
+		scoringDone = make(chan struct{})
+		go func() {
+			defer close(scoringDone)
+			score(scoringCtx, rabbitmqClient)
+		}()
+	}
+	stopScoring := func() {
+		if scoringCancel != nil {
+			scoringCancel()
+			<-scoringDone
+			scoringCancel = nil
+			scoringDone = nil
+		}
+	}
+	defer stopScoring()
+	startScoring()
 
 	for {
 		select {
 		case <-minionCtx.Done():
-			return
+			return minionCtx.Err()
 		case <-ticker.C:
 			err := heartbeatClient.SendHeartbeat(minionCtx)
 			if err != nil {
-				logrus.WithError(err).Error("failed to send heartbeat")
-				return
+				return fmt.Errorf("send heartbeat: %w", err)
 			}
-
-			timeout := time.NewTimer(5 * time.Second)
 			select {
-			case <-timeout.C:
-				logrus.Error("failed to publish to heartbeatSuccess channel")
-				return
-			case <-minionCtx.Done():
-				timeout.Stop()
-				return
 			case heartbeatSuccess <- struct{}{}:
-				timeout.Stop()
+			default:
 			}
 
-		case workerStatus := <-workerStatusChannel:
+		case workerStatus, ok := <-workerStatusChannel:
+			if !ok {
+				return fmt.Errorf("worker status channel closed")
+			}
 			disabled := workerStatus.Disabled(config.Minion.ID)
 
-			if disabled && scoring {
-				scoringCtxCancel()
-			} else if !disabled && !scoring {
-				scoringCtx, scoringCtxCancel = context.WithCancel(minionCtx)
-				go score(scoringCtx, rabbitmqClient)
-				scoring = true
+			if disabled {
+				stopScoring()
+			} else if scoringCancel == nil {
+				startScoring()
 			}
-
-		case <-scoringCtx.Done():
-			scoring = false
+		case <-scoringDone:
+			stopScoring()
+			return fmt.Errorf("scoring listener stopped")
 		}
 	}
 }
@@ -189,13 +203,15 @@ func minionLoop(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnection
 func score(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections) {
 	taskRequestListener, err := rabbitmqClient.TaskRequestListener(ctx)
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to create task request listener")
+		logrus.WithError(err).Error("failed to create task request listener")
+		return
 	}
 	defer taskRequestListener.Close()
 
 	taskResponseClient, err := rabbitmqClient.TaskResponseClient()
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to create task response client")
+		logrus.WithError(err).Error("failed to create task response client")
+		return
 	}
 	defer taskResponseClient.Close()
 
@@ -203,8 +219,8 @@ func score(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections) {
 	// minion's memory, sockets, and goroutine count bounded.
 	maxConcurrentChecks := min(max(runtime.NumCPU()*2, 4), 32)
 	semaphore := make(chan struct{}, maxConcurrentChecks)
-	var checks sync.WaitGroup
-	defer checks.Wait()
+	var checksWg sync.WaitGroup
+	defer checksWg.Wait()
 
 	for {
 		// recieved score task
@@ -246,9 +262,9 @@ func score(ctx context.Context, rabbitmqClient *rabbitmq.RabbitMQConnections) {
 		}
 
 		// run check
-		checks.Add(1)
+		checksWg.Add(1)
 		go func(checkDeadline time.Time, submissionDeadline time.Time, statusID uuid.UUID, check checks.Check, task_config string) {
-			defer checks.Done()
+			defer checksWg.Done()
 			defer func() { <-semaphore }()
 			checkCtx, checkCancel := context.WithDeadline(ctx, checkDeadline)
 			submissionCtx, submissionCancel := context.WithDeadline(ctx, submissionDeadline)

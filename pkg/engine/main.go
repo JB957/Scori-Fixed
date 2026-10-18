@@ -37,6 +37,9 @@ const (
 type Client struct {
 	lock                 *sync.Mutex
 	state                atomic.Int32
+	nextRoundAt          atomic.Int64
+	loopCancel           context.CancelFunc
+	loopVersion          uint64
 	ctx                  context.Context
 	ent                  *ent.Client
 	redis                *redis.Client
@@ -93,8 +96,14 @@ func (e *Client) Stop() error {
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
-	if e.getState() == EngineWaiting {
+	if e.getState() == EngineWaiting || e.getState() == EngineRunning {
 		e.setState(EnginePaused)
+		e.nextRoundAt.Store(0)
+		e.loopVersion++
+		if e.loopCancel != nil {
+			e.loopCancel()
+			e.loopCancel = nil
+		}
 		_, err := cache.PublishEngineState(context.Background(), e.redis, model.EngineStatePaused)
 		return err
 	}
@@ -103,11 +112,20 @@ func (e *Client) Stop() error {
 }
 
 func (e *Client) Start() error {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
 	if !e.casState(EnginePaused, EngineWaiting) {
 		return fmt.Errorf("engine is not paused (current state: %d)", e.getState())
 	}
 
-	go e.loop()
+	loopCtx, cancel := context.WithCancel(e.ctx)
+	e.loopCancel = cancel
+	e.loopVersion++
+	version := e.loopVersion
+	ticker := time.NewTicker(config.Interval)
+	e.nextRoundAt.Store(time.Now().Add(config.Interval).UnixNano())
+	go e.loop(loopCtx, ticker, version)
 
 	_, err := cache.PublishEngineState(context.Background(), e.redis, model.EngineStateWaiting)
 	return err
@@ -126,32 +144,55 @@ func (e *Client) State() (model.EngineState, error) {
 	return "", fmt.Errorf("unknown engine state %q", e.getState())
 }
 
-func (e *Client) loop() {
-	ticker := time.NewTicker(config.Interval)
+func (e *Client) NextRoundAt() time.Time {
+	if e.getState() == EnginePaused {
+		return time.Time{}
+	}
+	next := e.nextRoundAt.Load()
+	if next == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, next)
+}
+
+func (e *Client) loop(ctx context.Context, ticker *time.Ticker, version uint64) {
 
 	defer func() {
 		ticker.Stop()
-		e.setState(EnginePaused)
-		cache.PublishEngineState(context.Background(), e.redis, model.EngineStatePaused)
+		e.lock.Lock()
+		defer e.lock.Unlock()
+		if e.loopVersion == version {
+			e.loopCancel = nil
+			e.nextRoundAt.Store(0)
+			e.setState(EnginePaused)
+			cache.PublishEngineState(context.Background(), e.redis, model.EngineStatePaused)
+		}
 	}()
 
 	for {
 		select {
-		case <-e.ctx.Done():
+		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if e.getState() == EnginePaused {
+		case tick := <-ticker.C:
+			if ctx.Err() != nil || e.getState() == EnginePaused {
 				return
 			}
-
-			err := e.loopRoundRunner()
+			err := e.loopRoundRunner(ctx, version, tick)
 			if err != nil {
+				if err == context.Canceled {
+					return
+				}
 				logrus.WithError(err).Error("failed to run round")
 				return
 			}
-
+			e.lock.Lock()
+			if ctx.Err() != nil || e.loopVersion != version {
+				e.lock.Unlock()
+				return
+			}
 			e.setState(EngineWaiting)
 			_, err = cache.PublishEngineState(context.Background(), e.redis, model.EngineStateWaiting)
+			e.lock.Unlock()
 			if err != nil {
 				logrus.WithError(err).Error("failed to publish engine state")
 				return
@@ -160,9 +201,13 @@ func (e *Client) loop() {
 	}
 }
 
-func (e *Client) loopRoundRunner() error {
+func (e *Client) loopRoundRunner(ctx context.Context, version uint64, tick time.Time) error {
 	e.lock.Lock()
 	defer e.lock.Unlock()
+	if ctx.Err() != nil || e.loopVersion != version {
+		return context.Canceled
+	}
+	e.nextRoundAt.Store(tick.Add(config.Interval).UnixNano())
 
 	e.setState(EngineRunning)
 	_, err := cache.PublishEngineState(context.Background(), e.redis, model.EngineStateRunning)
@@ -258,21 +303,24 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		return err
 	}
 
-	entStatuses, err := e.ent.Status.CreateBulk(
-		static.MapSlice(
-			tasks,
-			func(i int, task *ent.CheckConfig) *ent.StatusCreate {
-				return e.ent.Status.Create().
-					SetRound(entRound).
-					SetUser(task.Edges.User).
-					SetCheck(task.Edges.Check).
-					SetPoints(task.Edges.Check.Weight).
-					SetStatus(status.StatusUnknown)
-			},
-		)...,
-	).Save(ctx)
-	if err != nil {
-		return err
+	var entStatuses []*ent.Status
+	if len(tasks) > 0 {
+		entStatuses, err = e.ent.Status.CreateBulk(
+			static.MapSlice(
+				tasks,
+				func(i int, task *ent.CheckConfig) *ent.StatusCreate {
+					return e.ent.Status.Create().
+						SetRound(entRound).
+						SetUser(task.Edges.User).
+						SetCheck(task.Edges.Check).
+						SetPoints(task.Edges.Check.Weight).
+						SetStatus(status.StatusUnknown)
+				},
+			)...,
+		).Save(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	kothTasks, err := e.ent.KothCheck.Query().
@@ -281,19 +329,22 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		return err
 	}
 
-	entKothStatuses, err := e.ent.KothStatus.CreateBulk(
-		static.MapSlice(
-			kothTasks,
-			func(i int, task *ent.KothCheck) *ent.KothStatusCreate {
-				return e.ent.KothStatus.Create().
-					SetRound(entRound).
-					SetPoints(task.Weight).
-					SetCheck(task)
-			},
-		)...,
-	).Save(ctx)
-	if err != nil {
-		return err
+	var entKothStatuses []*ent.KothStatus
+	if len(kothTasks) > 0 {
+		entKothStatuses, err = e.ent.KothStatus.CreateBulk(
+			static.MapSlice(
+				kothTasks,
+				func(i int, task *ent.KothCheck) *ent.KothStatusCreate {
+					return e.ent.KothStatus.Create().
+						SetRound(entRound).
+						SetPoints(task.Weight).
+						SetCheck(task)
+				},
+			)...,
+		).Save(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Create a map of round tasks to keep track of the tasks
@@ -377,15 +428,13 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 		defer cancel()
 
-		for status_id := range roundTasks.Map() {
-			entStatus, err := e.ent.Status.UpdateOneID(status_id).
+		if missing := roundTasks.Keys(); len(missing) > 0 {
+			if _, err := e.ent.Status.Update().
+				Where(status.IDIn(missing...)).
 				SetStatus(status.StatusUnknown).
 				SetPoints(0).
-				Save(ctx)
-			if err != nil {
-				logrus.WithField("id", status_id).WithError(err).Error("failed to update status")
-			} else {
-				logrus.WithField("status", entStatus).Debug("status not reported, set to 0")
+				Save(ctx); err != nil {
+				logrus.WithError(err).Error("failed to mark unreported statuses as unknown")
 			}
 		}
 
@@ -416,19 +465,21 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 		if err != nil {
 			logrus.WithError(err).Error("failed to aggregate points")
 		} else {
-			_, err = e.ent.ScoreCache.CreateBulk(
-				static.MapSlice(
-					users,
-					func(i int, user userScore) *ent.ScoreCacheCreate {
-						return e.ent.ScoreCache.Create().
-							SetRound(entRound).
-							SetUserID(user.UserID).
-							SetPoints(user.Sum)
-					},
-				)...,
-			).Save(ctx)
-			if err != nil {
-				logrus.WithError(err).Error("failed to create score cache")
+			if len(users) > 0 {
+				_, err = e.ent.ScoreCache.CreateBulk(
+					static.MapSlice(
+						users,
+						func(i int, user userScore) *ent.ScoreCacheCreate {
+							return e.ent.ScoreCache.Create().
+								SetRound(entRound).
+								SetUserID(user.UserID).
+								SetPoints(user.Sum)
+						},
+					)...,
+				).Save(ctx)
+				if err != nil {
+					logrus.WithError(err).Error("failed to create score cache")
+				}
 			}
 		}
 
@@ -507,11 +558,15 @@ func (e *Client) runRound(ctx context.Context, entRound *ent.Round) error {
 }
 
 func cleanStatus(s string) string {
-	return strings.ReplaceAll(s, "\x00", "")
+	s = strings.ReplaceAll(s, "\x00", "")
+	if len(s) > 4096 {
+		return s[:4096]
+	}
+	return s
 }
 
 func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.CheckConfig], statusID uuid.UUID, errorMessage string, checkStatus status.Status, minionID uuid.UUID, allChecksReported chan<- struct{}, once *sync.Once) {
-	ok, remaining := roundTasks.Pop(statusID)
+	_, ok := roundTasks.Get(statusID)
 	if !ok {
 		logrus.WithField("status_id", statusID).Error("uuid not belong to round was submitted")
 		return
@@ -532,7 +587,9 @@ func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[u
 	_, err := entStatusUpdate.Save(ctx)
 	if err != nil {
 		logrus.WithField("id", statusID).WithError(err).Error("failed to update status")
+		return
 	}
+	_, remaining := roundTasks.Pop(statusID)
 
 	if remaining == 0 {
 		once.Do(func() {
@@ -542,19 +599,11 @@ func (e *Client) updateStatus(ctx context.Context, roundTasks *structs.SyncMap[u
 }
 
 func (e *Client) updateKothStatus(ctx context.Context, roundTasks *structs.SyncMap[uuid.UUID, *ent.KothCheck], kothTaskResponse *structs.KothTaskResponse, allChecksReported chan<- struct{}, once *sync.Once) {
-	ok, remaining := roundTasks.Pop(kothTaskResponse.StatusID)
+	_, ok := roundTasks.Get(kothTaskResponse.StatusID)
 	if !ok {
 		logrus.WithField("status_id", kothTaskResponse.StatusID).Error("uuid not belong to round was submitted")
 		return
 	}
-
-	defer func() {
-		if remaining == 0 {
-			once.Do(func() {
-				allChecksReported <- struct{}{}
-			})
-		}
-	}()
 
 	entKothStatusUpdate := e.ent.KothStatus.UpdateOneID(kothTaskResponse.StatusID)
 
@@ -571,5 +620,11 @@ func (e *Client) updateKothStatus(ctx context.Context, roundTasks *structs.SyncM
 	if err != nil {
 		logrus.WithField("status_id", kothTaskResponse.StatusID).WithError(err).Error("failed to update koth status")
 		return
+	}
+	_, remaining := roundTasks.Pop(kothTaskResponse.StatusID)
+	if remaining == 0 {
+		once.Do(func() {
+			allChecksReported <- struct{}{}
+		})
 	}
 }

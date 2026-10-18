@@ -160,7 +160,7 @@ export default function EditCheck({
                   />
                 </Tooltip>
                 <Tooltip
-                  title={`Memory Usage: ${bytesToSize(
+                  title={`Minion process RSS / host RAM: ${bytesToSize(
                     minion.metrics.memory_usage
                   )} / ${bytesToSize(minion.metrics.memory_total)}`}
                 >

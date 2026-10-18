@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -39,13 +40,20 @@ func SetMinionHeartbeat(ctx context.Context, minionID uuid.UUID, redisClient *re
 		return err
 	}
 
-	return redisClient.Set(ctx, fmt.Sprintf("%s:%s", minion_heartbeat_key_prefix, minionID.String()), data, 0).Err()
+	return redisClient.Set(ctx, fmt.Sprintf("%s:%s", minion_heartbeat_key_prefix, minionID.String()), data, 30*time.Second).Err()
 }
 
 func GetMinionHeartbeatGroup(ctx context.Context, redisClient *redis.Client) ([]*structs.Heartbeat, error) {
-	keys, err := redisClient.Keys(ctx, fmt.Sprintf("%s:*", minion_heartbeat_key_prefix)).Result()
-	if err != nil {
+	var keys []string
+	iter := redisClient.Scan(ctx, 0, fmt.Sprintf("%s:*", minion_heartbeat_key_prefix), 100).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
 		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
 	}
 
 	data, err := redisClient.MGet(ctx, keys...).Result()

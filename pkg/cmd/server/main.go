@@ -53,6 +53,8 @@ var Cmd = &cobra.Command{
 // and the websocket handshake origin check.
 func allowedOrigins() []string {
 	return []string{
+		fmt.Sprintf("http://%s", config.Domain),
+		fmt.Sprintf("https://%s", config.Domain),
 		fmt.Sprintf("http://%s:%d", config.Domain, config.Port),
 		fmt.Sprintf("https://%s:%d", config.Domain, config.Port),
 		fmt.Sprintf("http://%s:3000", config.Domain),
@@ -267,8 +269,9 @@ func injectSubmissionFileHandler(entClient *ent.Client) gin.HandlerFunc {
 	}
 }
 
-func startWebServer(ctx context.Context, wg *sync.WaitGroup, entClient *ent.Client, redisClient *redis.Client, engineClient *engine.Client, taskRequestChan chan *structs.TaskRequest, taskResponseChan chan *structs.TaskResponse, workerStatusChan chan *structs.WorkerStatus) {
+func startWebServer(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, entClient *ent.Client, redisClient *redis.Client, engineClient *engine.Client, taskRequestChan chan *structs.TaskRequest, taskResponseChan chan *structs.TaskResponse, workerStatusChan chan *structs.WorkerStatus) {
 	defer wg.Done()
+	defer cancel()
 
 	gin.SetMode(gin.ReleaseMode)
 
@@ -289,6 +292,22 @@ func startWebServer(ctx context.Context, wg *sync.WaitGroup, entClient *ent.Clie
 	}))
 
 	router.GET("/", gin.WrapH(playground.Handler("GraphQL playground", "/api/query")))
+	router.GET("/api/engine/timing", func(c *gin.Context) {
+		state, err := engineClient.State()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		remaining := int64(0)
+		if next := engineClient.NextRoundAt(); !next.IsZero() {
+			remaining = max(0, time.Until(next).Milliseconds())
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"state":       state,
+			"intervalMs":  config.Interval.Milliseconds(),
+			"remainingMs": remaining,
+		})
+	})
 	router.POST("/api/query", graphqlHandler(entClient, taskRequestChan, taskResponseChan, workerStatusChan, redisClient, engineClient))
 	router.GET("/api/query", graphqlHandler(entClient, taskRequestChan, taskResponseChan, workerStatusChan, redisClient, engineClient))
 	router.GET("/api/files/inject/:parentID/:fileID/:filename", injectFileHandler(entClient))
@@ -518,7 +537,7 @@ func run(cmd *cobra.Command, args []string) {
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
-	go startWebServer(ctx, wg, entClient, redisClient, engineClient, taskRequestChan, taskResponseChan, workerStatusChan)
+	go startWebServer(ctx, cancel, wg, entClient, redisClient, engineClient, taskRequestChan, taskResponseChan, workerStatusChan)
 	go startRabbitMQServer(wg, ctx, cancel, taskRequestChan, taskResponseChan, workerStatusChan, kothTaskRequestChan, kothTaskResponseChan, redisClient, entClient)
 
 	wg.Wait()

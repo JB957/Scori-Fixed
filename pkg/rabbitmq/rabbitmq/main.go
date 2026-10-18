@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -43,16 +45,16 @@ func (r *RabbitMQConnections) Close() error {
 }
 
 func openConnection(vhost string, username string, password string) (*amqp.Connection, error) {
-	connStr := fmt.Sprintf(
-		"amqp://%s:%s@%s:%d/%s",
-		username,
-		password,
-		config.RabbitMQ.Host,
-		config.RabbitMQ.Port,
-		vhost,
-	)
-
-	conn, err := amqp.Dial(connStr)
+	connStr := (&url.URL{
+		Scheme: "amqp",
+		User:   url.UserPassword(username, password),
+		Host:   net.JoinHostPort(config.RabbitMQ.Host, fmt.Sprint(config.RabbitMQ.Port)),
+		Path:   "/" + vhost,
+	}).String()
+	conn, err := amqp.DialConfig(connStr, amqp.Config{
+		Heartbeat: 10 * time.Second,
+		Dial:      amqp.DefaultDial(10 * time.Second),
+	})
 	if err != nil {
 		return nil, err
 	}

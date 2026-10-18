@@ -47,33 +47,26 @@ export default function App() {
     return theme === "dark" ? darkTheme : lightTheme;
   }, [theme]);
 
-  const wsLink = new GraphQLWsLink(
-    createClient({
-      url: ws_endpoint,
-    })
-  );
-
-  const httpLink = createUploadLink({
-    uri: gql_endpoint,
-    credentials: "include",
-  });
-
-  const splitLink = split(
-    ({ query }) => {
-      const definition = getMainDefinition(query);
-      return (
-        definition.kind === "OperationDefinition" &&
-        definition.operation === "subscription"
-      );
-    },
-    wsLink,
-    httpLink
-  );
-
-  const client = new ApolloClient({
-    link: splitLink,
-    cache: new InMemoryCache(),
-  });
+  const client = useMemo(() => {
+    const wsClient = createClient({ url: ws_endpoint });
+    const wsLink = new GraphQLWsLink(wsClient);
+    const httpLink = createUploadLink({
+      uri: gql_endpoint,
+      credentials: "include",
+    });
+    const splitLink = split(
+      ({ query }) => {
+        const definition = getMainDefinition(query);
+        return (
+          definition.kind === "OperationDefinition" &&
+          definition.operation === "subscription"
+        );
+      },
+      wsLink,
+      httpLink
+    );
+    return new ApolloClient({ link: splitLink, cache: new InMemoryCache() });
+  }, []);
 
   return (
     <ThemeProvider theme={muiTheme}>
